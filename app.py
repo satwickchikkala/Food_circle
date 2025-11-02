@@ -25,8 +25,12 @@ from db import (
     create_gamification_tables_if_not_exists,
     get_user_stats,
     get_user_badges,
-    complete_claim_and_award_points
+    complete_claim_and_award_points,
     # --- END: Added for Feature 1 (Gamification) ---
+    
+    # --- START: Added for Feature 3 (NGO Mode) ---
+    alter_listings_table_for_visibility
+    # --- END: Added for Feature 3 (NGO Mode) ---
 )
 from maps_utils import reverse_geocode, static_map_url, directions_url
 from email_utils import send_email
@@ -121,6 +125,11 @@ alter_claims_table_if_needed()
 # Create the gamification tables on app startup
 create_gamification_tables_if_not_exists()
 # --- END: Added for Feature 1 (Gamification) ---
+
+# --- START: Added for Feature 3 (NGO Mode) ---
+# Alter listings table to add 'visibility' column if needed
+alter_listings_table_for_visibility()
+# --- END: Added for Feature 3 (NGO Mode) ---
 
 
 st.set_page_config(page_title="Community Surplus Food", layout="wide")
@@ -660,18 +669,15 @@ def home_page():
 # -------------------------------
 # Donor Page
 # -------------------------------
-# In app.py, replace your existing donor_page function with this one
-
+# --- REPLACED for Feature 3 (NGO Mode) ---
 def donor_page():
     if st.button("⬅️ Back to Home"):
         st.session_state.page = "home"
         st.rerun()
     st.header("Donor Dashboard – Create a listing")
 
-    # <<-- CHANGE 1: Display the success message if it exists -->>
     if st.session_state.get("listing_success_message"):
         st.success(st.session_state.listing_success_message)
-        # Clear the message so it doesn't show again on the next reload
         st.session_state.listing_success_message = None
 
     st.info("📍 Please use the button below to detect your current location before publishing your listing.")
@@ -704,8 +710,23 @@ def donor_page():
             prepared_at = st.date_input("Prepared on", value=datetime.date.today())
         if food_type == "packaged":
             expiry_at = st.date_input("Expiry date", value=datetime.date.today())
-        quantity = st.text_input("Quantity (eg: 5 portions)")
+        quantity = st.text_input("Quantity (eg: 5 portions, 20 kgs)")
         photo = st.file_uploader("Photo", type=["jpg", "jpeg", "png"])
+        
+        # --- START: Added for Feature 3 (NGO Mode) ---
+        user_type = st.session_state.user.get("user_type")
+        visibility_options = ["Everyone"]
+        
+        # Only show the "NGOs Only" option if the user is a bulk donor
+        if user_type in ["Restaurant", "Event Organizer"]:
+            visibility_options.append("NGOs Only")
+        
+        visibility_selection = st.selectbox(
+            "Who can see this listing?", 
+            visibility_options,
+            help="Select 'NGOs Only' for large-quantity donations intended for organizations."
+        )
+        # --- END: Added for Feature 3 (NGO Mode) ---
 
         address_value = address_text or (f"{lat},{lng}" if lat and lng else "")
         address_input = st.text_input("Address", value=address_value)
@@ -727,16 +748,20 @@ def donor_page():
                     f.write(photo.getbuffer())
                 photo_path = str(fpath)
 
+            # --- START: Added for Feature 3 (NGO Mode) ---
+            visibility = "everyone" if visibility_selection == "Everyone" else "ngo_only"
+            # --- END: Added for Feature 3 (NGO Mode) ---
+
             data = {
                 "donor_id": st.session_state.user["id"],
                 "title": title, "notes": notes, "food_type": food_type, "veg": veg,
                 "cuisine": cuisine, "prepared_at": prepared_at.isoformat() if prepared_at else None,
                 "expiry_at": expiry_at.isoformat() if expiry_at else None, "quantity": quantity,
                 "photo_path": photo_path, "lat": lat, "lng": lng, "address_text": address_input,
+                "visibility": visibility # <-- ADDED THIS
             }
             lid = create_listing(data)
             
-            # <<-- CHANGE 2: Set the success message in the session state -->>
             st.session_state.listing_success_message = f"✅ Your listing for '{title}' was published successfully!"
             
             st.session_state.detected_lat = None
@@ -747,24 +772,37 @@ def donor_page():
 # -------------------------------
 # Receiver Page
 # -------------------------------
-# -------------------------------
-# Receiver Page
-# -------------------------------
-
-
+# --- REPLACED for Feature 3 (NGO Mode) ---
 def receiver_page():
     if st.button("⬅️ Back to Home"):
         st.session_state.page = "home"
         st.rerun()
     st.header("Receiver – Browse available food")
 
-    listings = get_available_listings()
+    # --- MODIFIED ---
+    # Pass the current user's ID to the "smart" function
+    listings = get_available_listings(st.session_state.user["id"])
+    # --- END MODIFICATION ---
+
     L = [dict(r) for r in listings]
     st.subheader(f"{len(L)} available listings")
+    
+    # --- ADDED for Feature 3 ---
+    # Show a special message if the user is an NGO
+    if st.session_state.user.get("user_type") == "NGO":
+        st.info("ℹ️ As an NGO, you can see both public listings and special 'NGO-only' bulk donations.")
+    # --- END ADDITION ---
 
     for item in L:
         with st.expander(item.get("title") or "Food Available"):
+            
+            # --- ADDED for Feature 3 ---
+            if item.get("visibility") == "ngo_only":
+                st.warning("**NGO-ONLY LISTING** (Visible only to you)")
+            # --- END ADDITION ---
+
             st.write(item.get("notes"))
+            st.write(f"**Quantity:** {item.get('quantity', 'N/A')}")
             st.write("Veg" if item.get("veg") else "Non-Veg")
             st.write(item.get("address_text") or "Address hidden")
             if item.get("photo_path"):
@@ -786,27 +824,22 @@ def receiver_page():
                         donor = dict(get_user_by_id(item["donor_id"]))
                         receiver = dict(get_user_by_id(st.session_state.user["id"]))
 
-                        # <<-- CHANGE 1: Display donor's phone number as a clickable link -->>
                         donor_phone = donor.get("phone")
                         if donor_phone:
-                            # Use st.markdown to render the HTML link
                             st.markdown(f"""
                                 <div style="background-color: #e6ffe6; border-left: 5px solid #007bff; padding: 10px; border-radius: 5px; margin: 10px 0; color: black;">
                                     📞 <span style="color: black;">You can contact the donor at:</span> <a href="tel:{donor_phone}">{donor_phone}</a>
                                 </div>
                             """, unsafe_allow_html=True)
-
                         else:
                             st.warning("The donor has not provided a phone number.")
                         
                         print(f"🎯 Creating notification for donor {item['donor_id']} ({donor.get('email')})")
                         
-                        # <<-- CHANGE 2: Add receiver's clickable phone link to the notification message -->>
                         receiver_name = receiver.get('name', 'Someone')
                         receiver_phone = receiver.get('phone', 'Not provided')
                         listing_title = item.get('title', '')
                         
-                        # Create a clickable link if a phone number exists
                         phone_link_html = f'<a href="tel:{receiver_phone}">{receiver_phone}</a>' if receiver.get('phone') else 'Not provided'
                         
                         notification_title = "Your food has been claimed!"
@@ -826,7 +859,6 @@ def receiver_page():
                         else:
                             st.warning("⚠️ Could not create notification (but claim was successful)")
                         
-                        # ... (rest of the function is the same)
                         receiver_location = ""
                         loc = streamlit_geolocation()
                         if loc and loc.get("latitude") and loc.get("longitude"):
@@ -861,6 +893,7 @@ def receiver_page():
                     st.components.v1.html(dir_html, height=100)
                 else:
                     st.warning("Already claimed.")
+
 # -------------------------------
 # My Listings / Claims
 # -------------------------------
@@ -901,6 +934,11 @@ def my_listings_page():
             st.markdown(f"**Notes:** {row.get('notes', '')}")
             st.markdown(f"**Quantity:** {row.get('quantity', '')}")
             st.markdown(f"**Address:** {row.get('address_text', '')}")
+            
+            # --- ADDED for Feature 3 ---
+            if row.get('visibility') == 'ngo_only':
+                st.info("ℹ️ This was an NGO-only listing.")
+            # --- END ADDITION ---
             
             # --- START: Gamification & Review Logic ---
             if row.get('status') == 'RESERVED' and row.get('receiver_id'):
