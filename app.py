@@ -12,7 +12,21 @@ from db import (
     mark_notification_as_read,
     get_unread_notification_count,
     clear_all_notifications,
-    clear_read_notifications
+    clear_read_notifications,
+    # --- START: Added for Feature 2 (Ratings) ---
+    create_reviews_table_if_not_exists,
+    create_review,
+    get_reviews_for_user,
+    check_review_exists,
+    # --- END: Added for Feature 2 (Ratings) ---
+    
+    # --- START: Added for Feature 1 (Gamification) ---
+    alter_claims_table_if_needed,
+    create_gamification_tables_if_not_exists,
+    get_user_stats,
+    get_user_badges,
+    complete_claim_and_award_points
+    # --- END: Added for Feature 1 (Gamification) ---
 )
 from maps_utils import reverse_geocode, static_map_url, directions_url
 from email_utils import send_email
@@ -95,6 +109,19 @@ debug_database_structure()
 
 # Fix database schema before anything else
 fix_database_schema()
+
+# --- START: Added for Feature 2 (Ratings) ---
+# Create the reviews table on app startup
+create_reviews_table_if_not_exists()
+# --- END: Added for Feature 2 (Ratings) ---
+
+# --- START: Added for Feature 1 (Gamification) ---
+# Alter claims table to add 'status' column if needed
+alter_claims_table_if_needed()
+# Create the gamification tables on app startup
+create_gamification_tables_if_not_exists()
+# --- END: Added for Feature 1 (Gamification) ---
+
 
 st.set_page_config(page_title="Community Surplus Food", layout="wide")
 
@@ -236,7 +263,14 @@ st.markdown("""
         background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
         color: white;
     }
-    
+
+    /* --- ADDED FOR FEATURE 1 --- */
+    .nav-impact {
+        background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%);
+        color: #333;
+    }
+    /* --- END ADDITION --- */
+
     .nav-admin {
         background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%);
         color: #333;
@@ -297,6 +331,38 @@ st.markdown("""
         color: #666;
         line-height: 1.6;
     }
+
+    /* --- ADDED FOR FEATURE 1 --- */
+    /* Badge styling */
+    .badge-container {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1rem;
+    }
+    .badge {
+        background: #f0f2f6;
+        border: 1px solid #e0e0e0;
+        border-radius: 10px;
+        padding: 1rem;
+        width: 200px;
+        text-align: center;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    .badge-icon {
+        font-size: 2.5rem;
+    }
+    .badge-name {
+        font-weight: 600;
+        font-size: 1.1rem;
+        color: #333;
+        margin-top: 0.5rem;
+    }
+    .badge-desc {
+        font-size: 0.9rem;
+        color: #666;
+    }
+    /* --- END ADDITION --- */
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -351,9 +417,11 @@ if st.session_state.user:
     # Enhanced navigation
     st.sidebar.markdown("### 🚀 Navigation")
     
-    sidebar_options = ["Home", "My Listings", "My Claims", "Admin"]
-    option_icons = ["🏠", "📝", "🛒", "⚙️"]
-    option_classes = ["nav-home", "nav-listings", "nav-claims", "nav-admin"]
+    # --- MODIFIED FOR FEATURE 1 ---
+    sidebar_options = ["Home", "My Listings", "My Claims", "My Impact", "Admin"]
+    option_icons = ["🏠", "📝", "🛒", "🏆", "⚙️"]
+    option_classes = ["nav-home", "nav-listings", "nav-claims", "nav-impact", "nav-admin"]
+    # --- END MODIFICATION ---
     
     # Only update page if not on donor/receiver
     if st.session_state.page not in ["donor", "receiver"]:
@@ -560,8 +628,14 @@ def home_page():
                 notif = dict(notification)
                 is_read = notif.get("is_read", 0)
                 
+                # --- MODIFIED FOR FEATURE 1 ---
+                # Highlight new badge notifications
+                is_badge_notif = notif.get("type") == "badge"
                 if not is_read:
-                    st.markdown(f"<div style='background-color: #f0f8ff; padding: 10px; border-radius: 5px; border-inline-start: 4px solid #007bff; margin-block-end: 10px;'>", unsafe_allow_html=True)
+                    bg_color = "#fffbef" if is_badge_notif else "#f0f8ff"
+                    border_color = "#f9ca24" if is_badge_notif else "#007bff"
+                    st.markdown(f"<div style='background-color: {bg_color}; padding: 10px; border-radius: 5px; border-inline-start: 4px solid {border_color}; margin-block-end: 10px;'>", unsafe_allow_html=True)
+                # --- END MODIFICATION ---
                 else:
                     st.markdown(f"<div style='padding: 10px; border-radius: 5px; border-inline-start: 4px solid #ccc; margin-block-end: 10px;'>", unsafe_allow_html=True)
                 
@@ -790,56 +864,143 @@ def receiver_page():
 # -------------------------------
 # My Listings / Claims
 # -------------------------------
+
+# --- REPLACED for Feature 1 (Gamification) ---
 def my_listings_page():
     st.header("My Listings")
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM listings WHERE donor_id=? ORDER BY created_at DESC", (st.session_state.user["id"],))
+    
+    # MODIFIED QUERY: Added c.status as claim_status
+    cur.execute("""
+        SELECT 
+            l.*, 
+            c.id as claim_id,
+            c.receiver_id,
+            c.status as claim_status,  -- <-- ADDED
+            u.name as receiver_name
+        FROM listings l
+        LEFT JOIN claims c ON l.id = c.listing_id
+        LEFT JOIN users u ON c.receiver_id = u.id
+        WHERE l.donor_id = ? 
+        ORDER BY l.created_at DESC
+    """, (st.session_state.user["id"],))
+    
     rows = cur.fetchall()
     conn.close()
+
+    if not rows:
+        st.info("You have not created any listings yet.")
+        return
+
     for r in rows:
         row = dict(r)
-        st.markdown(f"""
-**Title:** {row.get('title', '')}  
-**Notes:** {row.get('notes', '')}  
-**Food Type:** {row.get('food_type', '')}  
-**Veg:** {'Yes' if row.get('veg') else 'No'}  
-**Cuisine:** {row.get('cuisine', '')}  
-**Prepared At:** {row.get('prepared_at', '')}  
-**Expiry At:** {row.get('expiry_at', '')}  
-**Quantity:** {row.get('quantity', '')}  
-**Photo Path:** {row.get('photo_path', '')}  
-**Address:** {row.get('address_text', '')}  
-**Latitude:** {row.get('lat', '')}  
-**Longitude:** {row.get('lng', '')}
-""")
-        st.markdown("---")
+        
+        # Use an expander for each listing
+        with st.expander(f"{row.get('title', '')} - Status: {row.get('status', '')}"):
+            st.markdown(f"**Notes:** {row.get('notes', '')}")
+            st.markdown(f"**Quantity:** {row.get('quantity', '')}")
+            st.markdown(f"**Address:** {row.get('address_text', '')}")
+            
+            # --- START: Gamification & Review Logic ---
+            if row.get('status') == 'RESERVED' and row.get('receiver_id'):
+                
+                claim_id = row['claim_id']
+                reviewer_id = st.session_state.user['id'] # Donor is reviewing
+                reviewee_id = row['receiver_id'] # Donor reviews the Receiver
+                receiver_name = row.get('receiver_name', 'the receiver')
+                claim_status = row.get('claim_status')
 
+                # --- 1. "Confirm Pickup" Button ---
+                if claim_status == 'RESERVED':
+                    st.warning(f"Waiting for {receiver_name} to pick up the item.")
+                    if st.button("✅ Confirm Pickup Completed", key=f"confirm_{claim_id}"):
+                        if complete_claim_and_award_points(claim_id, reviewer_id, reviewee_id):
+                            st.success("Pickup confirmed! Impact points and stats updated.")
+                            st.rerun()
+                        else:
+                            st.error("Could not confirm pickup.")
+                
+                elif claim_status == 'COMPLETED':
+                    st.success("✅ Pickup successfully completed.")
+                    
+                    # --- 2. Review Form (Only show *after* pickup is confirmed) ---
+                    already_reviewed = check_review_exists(claim_id, reviewer_id)
+                    
+                    if already_reviewed:
+                        st.success(f"You have already reviewed {receiver_name}.")
+                    else:
+                        with st.form(key=f"review_listing_{claim_id}"):
+                            st.subheader(f"Leave a review for {receiver_name}")
+                            rating = st.slider("Rating (1-5 Stars)", 1, 5, 5, key=f"rating_list_{claim_id}")
+                            comment = st.text_area("Comment (optional)", key=f"comment_list_{claim_id}")
+                            
+                            if st.form_submit_button("Submit Review"):
+                                review_id = create_review(claim_id, reviewer_id, reviewee_id, rating, comment)
+                                if review_id:
+                                    st.success("Thank you for your review!")
+                                    st.rerun()
+                                else:
+                                    st.error("There was an error submitting your review.")
+                
+            elif row.get('status') == 'AVAILABLE':
+                st.info("This listing is still available.")
+            # --- END: Gamification & Review Logic ---
+            st.markdown("---")
+
+
+# --- REPLACED for Feature 2 (Ratings) ---
 def my_claims_page():
     st.header("My Claims")
     conn = get_conn()
     cur = conn.cursor()
+    
+    # MODIFIED QUERY: Added listings.donor_id, donor's name, and claim_status
     cur.execute(
         """
-        SELECT claims.*, listings.title, listings.address_text, listings.lat, listings.lng
-        FROM claims JOIN listings ON claims.listing_id = listings.id
+        SELECT 
+            claims.*, 
+            claims.status as claim_status, -- <-- ADDED
+            listings.title, 
+            listings.address_text, 
+            listings.lat, 
+            listings.lng,
+            listings.donor_id,
+            users.name as donor_name
+        FROM claims 
+        JOIN listings ON claims.listing_id = listings.id
+        JOIN users ON listings.donor_id = users.id
         WHERE claims.receiver_id=? ORDER BY reserved_at DESC
         """,
         (st.session_state.user["id"],),
     )
     rows = cur.fetchall()
     conn.close()
+    
+    if not rows:
+        st.info("You have not claimed any items yet.")
+        return
+
     for r in rows:
         row = dict(r)
+        
+        # --- MODIFIED FOR FEATURE 1 ---
+        claim_status = row.get('claim_status')
+        status_message = "Pending Pickup"
+        if claim_status == 'COMPLETED':
+            status_message = "Pickup Completed"
+        elif claim_status == 'EXPIRED': # (If you add expiry logic to claims)
+            status_message = "Expired"
+            
         st.markdown(f"""
 **Title:** {row.get('title', '')}  
-**Status:** {row.get('status', '')}  
+**Status:** {status_message}  
 **Reserved At:** {row.get('reserved_at', '')}  
 **Expires At:** {row.get('expires_at', '')}  
 **Address:** {row.get('address_text', '')}  
-**Latitude:** {row.get('lat', '')}  
-**Longitude:** {row.get('lng', '')}
 """)
+        # --- END MODIFICATION ---
+
         if row.get("lat") and row.get("lng"):
             maps_url = directions_url(
                 origin_lat=None,
@@ -848,15 +1009,77 @@ def my_claims_page():
                 dest_lng=row['lng']
             )
             st.markdown(f"**Open in Google Maps** [link]({maps_url})")
+
+        # --- Review Form Logic (Only show if claim is COMPLETED) ---
+        
+        claim_id = row['id']
+        reviewer_id = st.session_state.user['id']
+        reviewee_id = row['donor_id'] # Receiver reviews the Donor
+        donor_name = row.get('donor_name', 'the donor')
+        
+        if claim_status == 'COMPLETED':
+            already_reviewed = check_review_exists(claim_id, reviewer_id)
+            
+            if already_reviewed:
+                st.success(f"You have already reviewed this transaction.")
+            else:
+                with st.expander(f"Leave a review for {donor_name}"):
+                    with st.form(key=f"review_claim_{claim_id}"):
+                        rating = st.slider("Rating (1-5 Stars)", 1, 5, 5, key=f"rating_{claim_id}")
+                        comment = st.text_area("Comment (optional)", key=f"comment_{claim_id}")
+                        
+                        if st.form_submit_button("Submit Review"):
+                            review_id = create_review(claim_id, reviewer_id, reviewee_id, rating, comment)
+                            if review_id:
+                                st.success("Thank you for your review!")
+                                st.rerun()
+                            else:
+                                st.error("There was an error submitting your review.")
+        else:
+            st.info("You can leave a review after the donor confirms the pickup.")
+            
+        # --- END Review Form Logic ---
         st.markdown("---")
 
 # -------------------------------
 # Admin
 # -------------------------------
+
+# --- REPLACED for Feature 2 (Ratings) ---
+# --- REPLACED for Feature 2 (Ratings) ---
 def admin_page():
     st.header("Profile Settings")
-
     user = st.session_state.user
+    
+    # --- START: Add Rating Display ---
+    st.subheader("Your Community Rating")
+    
+    # Get all reviews ABOUT this user
+    my_reviews = get_reviews_for_user(user["id"])
+    
+    if not my_reviews:
+        st.info("You have not received any reviews yet.")
+    else:
+        # Calculate average
+        total_rating = sum(dict(rev)['rating'] for rev in my_reviews)
+        avg_rating = total_rating / len(my_reviews)
+        
+        # Display stars
+        star_rating = "⭐" * int(round(avg_rating))
+        st.metric(label=f"Average Rating ({len(my_reviews)} reviews)", value=f"{avg_rating:.1f} / 5.0", delta=star_rating)
+        
+        with st.expander("See all comments"):
+            for rev in my_reviews:
+                review = dict(rev)
+                # Only show comments that were actually left
+                if review.get('comment'):
+                    st.markdown(f"**From {review.get('reviewer_name', 'A user')}:**")
+                    st.markdown(f"> {review['comment']}")
+                    st.markdown("---")
+    
+    st.markdown("---")
+    # --- END: Add Rating Display ---
+
     st.subheader("Edit Profile")
 
     # Editable profile fields
@@ -864,11 +1087,15 @@ def admin_page():
         name = st.text_input("Full Name", value=user.get("name") or "")
         phone = st.text_input("Phone", value=user.get("phone") or "")
         email = st.text_input("Email", value=user.get("email") or "", disabled=True)
+        
+        # --- THIS IS THE CORRECTED LINE ---
         user_type = st.selectbox(
             "Account type",
             ["Household", "Restaurant", "Event Organizer", "NGO", "Individual"],
             index=["Household", "Restaurant", "Event Organizer", "NGO", "Individual"].index(user.get("user_type") or "Household")
         )
+        # --- END OF CORRECTION ---
+
         submitted = st.form_submit_button("Save Changes")
         if submitted:
             conn = get_conn()
@@ -932,6 +1159,40 @@ def profile_setup_ui():
             st.session_state.page = "home"
             st.rerun()
 
+# --- START: Added for Feature 1 (Gamification) ---
+def my_impact_page():
+    st.header("🏆 My Impact Dashboard")
+    st.markdown("See the positive impact you're making in the community!")
+    
+    user_id = st.session_state.user["id"]
+    stats = get_user_stats(user_id)
+    
+    st.subheader("Your Stats")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Impact Points", f"💰 {stats.get('impact_points', 0)}")
+    col2.metric("Donations Made", f"🎁 {stats.get('donations_made', 0)}")
+    col3.metric("Items Received", f"🤝 {stats.get('claims_received', 0)}")
+    
+    st.markdown("---")
+    
+    st.subheader("My Badges")
+    badges = get_user_badges(user_id)
+    
+    if not badges:
+        st.info("You haven't earned any badges yet. Keep participating to unlock them!")
+    else:
+        st.markdown('<div class="badge-container">', unsafe_allow_html=True)
+        for badge in badges:
+            st.markdown(f"""
+            <div class="badge">
+                <div class="badge-icon">{badge.get('icon', '⭐')}</div>
+                <div class="badge-name">{badge.get('name', 'Badge')}</div>
+                <div class="badge-desc">{badge.get('description', '...')}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+# --- END: Added for Feature 1 (Gamification) ---
+
 # -------------------------------
 # Dispatch
 # -------------------------------
@@ -950,6 +1211,10 @@ elif "my listings" in pg:
     my_listings_page()
 elif "my claims" in pg:
     my_claims_page()
+# --- START: Added for Feature 1 (Gamification) ---
+elif "my impact" in pg:
+    my_impact_page()
+# --- END: Added for Feature 1 (Gamification) ---
 elif "admin" in pg:
     admin_page()
 elif "profile_setup" in pg:
