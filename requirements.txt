@@ -1,0 +1,6 @@
+streamlit
+bcrypt
+requests
+Pillow
+python-dotenv
+git+https://github.com/randyzwitch/streamlit-geolocation.git
