@@ -41,7 +41,7 @@ def create_listing(data: dict):
         data.get("expiry_at"),
         data.get("quantity"),
         data.get("photo_path"),
-        data.get("visibility", "anyone"),
+        data.get("visibility", "everyone"), # <-- Changed "anyone" to "everyone" for consistency
         data.get("lat"),
         data.get("lng"),
         data.get("address_text"),
@@ -51,13 +51,34 @@ def create_listing(data: dict):
     conn.close()
     return lid
 
-def get_available_listings():
+# --- MODIFIED for Feature 3 (NGO Mode) ---
+def get_available_listings(user_id):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM listings WHERE status = 'AVAILABLE' ORDER BY created_at DESC")
+    
+    # Get the current user's type
+    user_cur = conn.cursor()
+    user_cur.execute("SELECT user_type FROM users WHERE id = ?", (user_id,))
+    user_row = user_cur.fetchone()
+    user_type = user_row['user_type'] if user_row else "Individual"
+    
+    # Build the dynamic query
+    query = "SELECT * FROM listings WHERE status = 'AVAILABLE'"
+    
+    if user_type == "NGO":
+        # NGOs see both 'everyone' and 'ngo_only' listings
+        query += " AND (visibility = 'everyone' OR visibility = 'ngo_only')"
+    else:
+        # All other users see only 'everyone' listings
+        query += " AND visibility = 'everyone'"
+        
+    query += " ORDER BY created_at DESC"
+    
+    cur.execute(query)
     rows = cur.fetchall()
     conn.close()
     return rows
+# --- END MODIFICATION ---
 
 def expire_old_listings(now_iso, expiry_threshold_days=2):
     # basic example: if expiry_at passed or created more than threshold
@@ -684,3 +705,25 @@ def complete_claim_and_award_points(claim_id, donor_id, receiver_id):
         return False
 
 # --- END: Added for Feature 1 (Gamification) ---
+
+
+# --- START: Added for Feature 3 (NGO Mode) ---
+
+def alter_listings_table_for_visibility():
+    """Adds the visibility column to the listings table if it doesn't exist."""
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(listings)")
+        columns = [col[1] for col in cur.fetchall()]
+        
+        if 'visibility' not in columns:
+            cur.execute("ALTER TABLE listings ADD COLUMN visibility TEXT DEFAULT 'everyone'")
+            conn.commit()
+            print("✅ Added 'visibility' column to 'listings' table.")
+        
+        conn.close()
+    except Exception as e:
+        print(f"❌ Error altering 'listings' table for visibility: {e}")
+
+# --- END: Added for Feature 3 (NGO Mode) ---
